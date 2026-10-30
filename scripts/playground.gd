@@ -6,6 +6,9 @@ const Connections = preload("res://scripts/connection_system.gd")
 const Clipboard = preload("res://scripts/object_clipboard.gd")
 const FLOOR_Y := 620.0
 const CAMERA_SPEED := 540.0
+const MIN_ZOOM := 0.25
+const MAX_ZOOM := 4.0
+const ZOOM_STEP := 1.15
 var selected: RigidBody2D
 var followed: RigidBody2D
 var slow := false
@@ -586,19 +589,26 @@ func activate_selection() -> void:
 		if object is RigidBody2D and object.has_method("toggle_activation"):
 			object.toggle_activation()
 
-func link_click(body: RigidBody2D, at: Vector2) -> void:
-	if not is_instance_valid(body):
-		link_body = null
-	elif not is_instance_valid(link_body):
+func begin_link_drag(body: RigidBody2D, at: Vector2) -> void:
+	release_grab()
+	link_body = null
+	if is_instance_valid(body) and body.is_inside_tree() and tool in ["rope", "weld", "wire"]:
 		link_body = body
 		link_anchor = (at - body.global_position).rotated(-body.rotation) / body.body_size
-	elif body != link_body:
-		connection_system.add_connection(tool, link_body, link_body.global_position + (link_anchor * link_body.body_size).rotated(link_body.rotation), body, at)
-		link_body = null
+	queue_redraw()
+
+func finish_link_drag(body: RigidBody2D, at: Vector2) -> void:
+	if is_instance_valid(link_body) and link_body.is_inside_tree() and is_instance_valid(body) and body.is_inside_tree() and body != link_body and tool in ["rope", "weld", "wire"]:
+		var source_point: Vector2 = link_body.global_position + (link_anchor * link_body.body_size).rotated(link_body.rotation)
+		connection_system.add_connection(tool, link_body, source_point, body, at)
+	link_body = null
 	queue_redraw()
 
 func delete_object(object: Node) -> void:
 	if not is_instance_valid(object): return
+	if is_instance_valid(link_body) and link_body.object_owner == object:
+		link_body = null
+		queue_redraw()
 	connection_system.remove_for(object)
 	selected_owners.erase(object)
 	if cpu_target == object: close_cpu_editor()
@@ -657,10 +667,29 @@ func move_camera(offset: Vector2) -> void:
 	camera.position += offset
 	camera.force_update_scroll()
 
+func zoom_camera(factor: float, screen_position: Vector2) -> void:
+	var level := clampf(camera.zoom.x * factor, MIN_ZOOM, MAX_ZOOM)
+	if is_equal_approx(level, camera.zoom.x): return
+	# Keep the world point under the cursor fixed while changing the lens.
+	var before := get_viewport().get_canvas_transform().affine_inverse() * screen_position
+	camera.zoom = Vector2.ONE * level
+	camera.force_update_scroll()
+	var after := get_viewport().get_canvas_transform().affine_inverse() * screen_position
+	move_camera(before - after)
+
+func pointer_over_ui() -> bool:
+	return get_viewport().gui_get_hovered_control() != null
+
 func _input(event: InputEvent) -> void:
 	# Releases must also arrive when the pointer ends its drag over a UI control.
 	if event is InputEventMouseButton and not event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			if is_instance_valid(link_body):
+				var at: Vector2 = get_viewport().get_canvas_transform().affine_inverse() * event.position
+				var body: RigidBody2D = null
+				if not pointer_over_ui() and not main_menu.visible and not resize_panel.visible and not cpu_panel.visible:
+					body = pick_prop(at)
+				finish_link_drag(body, at)
 			if marquee: finish_marquee(get_global_mouse_position())
 			release_grab()
 		if event.button_index == MOUSE_BUTTON_MIDDLE: panning = false
@@ -676,6 +705,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if cpu_panel.visible: close_cpu_editor()
 		elif resize_panel.visible: close_resize()
 		elif context_menu.visible: context_menu.hide()
+		elif is_instance_valid(link_body):
+			link_body = null
+			queue_redraw()
 		elif main_menu.visible: play_game()
 		else: show_main_menu()
 		return
@@ -686,10 +718,17 @@ func _unhandled_input(event: InputEvent) -> void:
 				context_menu.hide()
 				var at := get_global_mouse_position()
 				var body := pick_prop(at)
-				if tool != "hand": link_click(body, at)
+				if tool != "hand": begin_link_drag(body, at)
 				elif body: begin_grab(body, at)
 				else: begin_marquee(at)
-			MOUSE_BUTTON_RIGHT: open_context(pick_prop(get_global_mouse_position()), event.position)
+			MOUSE_BUTTON_RIGHT:
+				link_body = null
+				queue_redraw()
+				open_context(pick_prop(get_global_mouse_position()), event.position)
+			MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
+				if not pointer_over_ui():
+					var direction := 1.0 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
+					zoom_camera(pow(ZOOM_STEP, direction * maxf(event.factor, 0.01)), event.position)
 			MOUSE_BUTTON_MIDDLE:
 				release_grab()
 				panning = true
@@ -711,7 +750,7 @@ func _process(delta: float) -> void:
 	var real_delta := delta / maxf(Engine.time_scale, 0.001)
 	if not resize_panel.visible and not cpu_panel.visible:
 		var axis := Vector2(float(Input.is_physical_key_pressed(KEY_RIGHT)) - float(Input.is_physical_key_pressed(KEY_LEFT)), float(Input.is_physical_key_pressed(KEY_DOWN)) - float(Input.is_physical_key_pressed(KEY_UP)))
-		if axis.length_squared() > 0: move_camera(axis.normalized() * CAMERA_SPEED * real_delta)
+		if axis.length_squared() > 0: move_camera(axis.normalized() * CAMERA_SPEED * real_delta / camera.zoom)
 		if is_instance_valid(selected):
 			var rotation_axis := float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
 			if selected.world_paused:

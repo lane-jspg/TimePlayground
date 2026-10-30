@@ -23,8 +23,8 @@ func key(scene: Node, code: Key) -> void:
 
 func connect_pair(scene: Node, kind: String, a: RigidBody2D, b: RigidBody2D) -> void:
 	scene.set_tool(kind)
-	scene.link_click(a, a.global_position)
-	scene.link_click(b, b.global_position)
+	scene.begin_link_drag(a, a.global_position)
+	scene.finish_link_drag(b, b.global_position)
 
 func all_nodes(node: Node) -> Array:
 	var result: Array = [node]
@@ -241,7 +241,7 @@ func run() -> void:
 	connect_pair(scene, "rope", a, b)
 	connect_pair(scene, "weld", a, b)
 	connect_pair(scene, "wire", b, outside)
-	check(scene.connection_system.connections.size() == 3 and scene.link_body == null, "rope weld and wire tools create two-click links")
+	check(scene.connection_system.connections.size() == 3 and scene.link_body == null, "rope weld and wire tools create drag links")
 	scene.begin_marquee(Vector2(350, 250))
 	scene.finish_marquee(Vector2(600, 350))
 	check(scene.selected_owners.size() == 2 and scene.selected_owners.has(a) and scene.selected_owners.has(b) and not scene.selected_owners.has(outside), "marquee selects intersecting objects and excludes outside object")
@@ -332,5 +332,34 @@ func run() -> void:
 	scene.begin_marquee(Vector2(300, 200))
 	scene.cancel_interaction()
 	check(not scene.marquee and not scene.panning, "focus loss cancels unfinished marquee and camera drag")
+	var cursor := Vector2(900, 250)
+	var anchor_before: Vector2 = scene.get_viewport().get_canvas_transform().affine_inverse() * cursor
+	scene.zoom_camera(1.15, cursor)
+	var anchor_after: Vector2 = scene.get_viewport().get_canvas_transform().affine_inverse() * cursor
+	check(is_equal_approx(scene.camera.zoom.x, 1.15) and anchor_before.distance_to(anchor_after) < 0.01, "zoom in keeps world point anchored under cursor")
+	scene.zoom_camera(1.0 / 1.15, cursor)
+	check(is_equal_approx(scene.camera.zoom.x, 1.0), "zoom out restores camera scale")
+	scene.zoom_camera(1000, cursor)
+	check(is_equal_approx(scene.camera.zoom.x, scene.MAX_ZOOM), "zoom upper bound enforced")
+	scene.zoom_camera(0.00001, cursor)
+	check(is_equal_approx(scene.camera.zoom.x, scene.MIN_ZOOM), "zoom lower bound enforced")
+	scene.zoom_camera(1.0 / scene.MIN_ZOOM, cursor)
+	scene.clear_world()
+	scene.paused = true
+	scene.update_time()
+	var anchor_a = scene.create_object("box", Vector2(500, 300))
+	var anchor_b = scene.create_object("box", Vector2(800, 300))
+	scene.set_tool("rope")
+	scene.begin_link_drag(anchor_a, anchor_a.global_position + Vector2(20, 10))
+	anchor_a.global_position += Vector2(40, 0)
+	scene.finish_link_drag(anchor_b, anchor_b.global_position + Vector2(-20, 10))
+	var endpoints: Array = scene.connection_system.endpoints(scene.connection_system.connections[0])
+	check(endpoints[0].is_equal_approx(anchor_a.global_position + Vector2(20, 10)) and endpoints[1].is_equal_approx(anchor_b.global_position + Vector2(-20, 10)), "drag keeps attachment points when source moves during gesture")
+	scene.begin_link_drag(anchor_a, anchor_a.global_position)
+	scene.delete_object(anchor_a)
+	check(scene.link_body == null and scene.connection_system.connections.is_empty(), "deleting source cancels pending drag and removes its links")
+	scene.begin_link_drag(anchor_b, anchor_b.global_position)
+	scene.finish_link_drag(anchor_b, anchor_b.global_position)
+	check(scene.link_body == null and scene.connection_system.connections.is_empty(), "releasing on source cancels instead of creating a self connection")
 	print("Smoke checks: ", checks, "; failures: ", failures)
 	quit(1 if failures else 0)

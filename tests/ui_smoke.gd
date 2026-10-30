@@ -5,6 +5,7 @@ extends SceneTree
 var world
 var failures := 0
 var checks := 0
+var held_buttons := 0
 
 func _initialize() -> void:
 	call_deferred("run")
@@ -26,6 +27,7 @@ func move_pointer(at: Vector2) -> void:
 	var event := InputEventMouseMotion.new()
 	event.position = at
 	event.global_position = at
+	event.button_mask = held_buttons
 	Input.parse_input_event(event)
 	await frames(2)
 
@@ -35,7 +37,11 @@ func mouse_button(at: Vector2, pressed: bool, button := MOUSE_BUTTON_LEFT) -> vo
 	event.position = at
 	event.global_position = at
 	event.pressed = pressed
-	event.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed and button == MOUSE_BUTTON_LEFT else 0
+	if button == MOUSE_BUTTON_LEFT:
+		if pressed: held_buttons |= MOUSE_BUTTON_MASK_LEFT
+		else: held_buttons &= ~MOUSE_BUTTON_MASK_LEFT
+	event.button_mask = held_buttons
+	event.factor = 1.0
 	Input.parse_input_event(event)
 	await frames(2)
 
@@ -43,6 +49,12 @@ func click(at: Vector2, button := MOUSE_BUTTON_LEFT) -> void:
 	await move_pointer(at)
 	await mouse_button(at, true, button)
 	await mouse_button(at, false, button)
+
+func drag(from: Vector2, to: Vector2) -> void:
+	await move_pointer(from)
+	await mouse_button(from, true)
+	await move_pointer(to)
+	await mouse_button(to, false)
 
 func key(code: Key) -> void:
 	var event := InputEventKey.new()
@@ -101,6 +113,17 @@ func run() -> void:
 	# Pause before the group/CPU tests so physical movement cannot race clicks.
 	await key(KEY_SPACE)
 	check(world.paused, "Space pauses simulation through real keyboard input")
+	var zoom_cursor := Vector2(880, 280)
+	await move_pointer(zoom_cursor)
+	var before_world: Vector2 = world.get_global_mouse_position()
+	var original_zoom: Vector2 = world.camera.zoom
+	await click(zoom_cursor, MOUSE_BUTTON_WHEEL_UP)
+	check(world.camera.zoom.x > original_zoom.x, "mouse wheel up zooms the paused world")
+	check(world.get_global_mouse_position().distance_to(before_world) < 0.1, "zoom preserves the world point beneath the cursor")
+	await click(zoom_cursor, MOUSE_BUTTON_WHEEL_DOWN)
+	check(world.camera.zoom.is_equal_approx(original_zoom) and world.get_global_mouse_position().distance_to(before_world) < 0.1, "mouse wheel down restores inverse zoom and cursor focus")
+	await click(Vector2(56, 218), MOUSE_BUTTON_WHEEL_UP)
+	check(world.camera.zoom.is_equal_approx(original_zoom), "scrolling over the object palette does not zoom the world")
 	await click_text("Clear Everything")
 	check(world.objects.get_child_count() == 0 and world.connection_system.connections.is_empty(), "Clear Everything removes objects and connections")
 	await click(Vector2(54, 148))
@@ -148,16 +171,28 @@ func run() -> void:
 	await click_text("Edit instructions")
 	check(world.cpu_panel.visible and world.code_editor.has_focus(), "Edit instructions opens focused GDScript editor")
 	await screenshot("/tmp/timeplayground-cpu-editor.png")
+	var editor_zoom: Vector2 = world.camera.zoom
+	await click(Vector2(600, 300), MOUSE_BUTTON_WHEEL_UP)
+	check(world.camera.zoom.is_equal_approx(editor_zoom), "scrolling within CPU editor does not zoom the world")
 	var count_before_typing: int = world.objects.get_child_count()
 	await key(KEY_Q)
 	check(world.objects.get_child_count() == count_before_typing, "typing Q in code editor does not spawn objects")
 	world.code_editor.text = "extends RefCounted\n\nfunc tick(cpu, delta):\n\tcpu.output_power = true\n"
 	await click_text("Apply instructions")
 	check(not world.cpu_panel.visible and "cpu.output_power = true" in cpu.program_source, "Apply instructions compiles editor contents")
+	await click_text("Rope")
+	await click(Vector2(500, 420))
+	await click(Vector2(700, 420))
+	check(world.connection_system.connections.is_empty(), "separate clicks no longer create a connection")
+	await drag(Vector2(500, 420), Vector2(600, 240))
+	check(world.connection_system.connections.is_empty() and not is_instance_valid(world.link_body), "releasing a connection over empty space cancels the drag")
+	await drag(Vector2(500, 420), Vector2(56, 218))
+	check(world.connection_system.connections.is_empty() and not is_instance_valid(world.link_body), "releasing a connection over palette UI cancels the drag")
+	await drag(Vector2(500, 420), Vector2(700, 420))
+	check(world.connection_system.connections.size() == 1 and world.connection_system.connections[0].kind == "rope", "press-drag-release connects two bodies with rope")
 	await click_text("Wire")
-	await click(Vector2(850, 250))
-	await click(Vector2(900, 360))
-	check(world.connection_system.connections.size() == 1 and world.connection_system.connections[0].kind == "wire", "two pointer clicks create a directed lever-to-CPU wire")
+	await drag(Vector2(850, 250), Vector2(900, 360))
+	check(world.connection_system.connections.size() == 2 and world.connection_system.connections[1].kind == "wire", "press-drag-release creates a directed lever-to-CPU wire")
 	await click_text("Hand")
 	await key(KEY_SPACE)
 	for i in 8: await physics_frame
@@ -165,5 +200,9 @@ func run() -> void:
 	await screenshot("/tmp/timeplayground-wired-cpu.png")
 	await click_text("Clear Everything")
 	check(world.objects.get_child_count() == 0 and world.connection_system.connections.is_empty(), "Clear Everything also removes electronic objects and drawn wires")
+	for i in 30: await click(Vector2(800, 300), MOUSE_BUTTON_WHEEL_UP)
+	check(is_equal_approx(world.camera.zoom.x, 4.0), "repeated wheel-up clamps zoom at 4x")
+	for i in 30: await click(Vector2(800, 300), MOUSE_BUTTON_WHEEL_DOWN)
+	check(is_equal_approx(world.camera.zoom.x, 0.25), "repeated wheel-down clamps zoom at 0.25x")
 	print("Rendered UI checks: ", checks, "; failures: ", failures)
 	quit(1 if failures else 0)
