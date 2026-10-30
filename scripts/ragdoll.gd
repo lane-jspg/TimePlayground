@@ -30,6 +30,7 @@ const JOINTS := [
 ]
 
 var torso: RigidBody2D
+var flipped := false
 var user_frozen := false
 var world_paused := false
 var ai_enabled := true
@@ -86,12 +87,6 @@ func _build() -> void:
 		body.angular_damp = 2.0
 		_parts[part_name] = body
 		torso = _parts["torso"]
-	# Parts may overlap in the flat drawing; do not let self-collisions explode
-	# the joints. They still collide with other props, ragdolls, and the world.
-	var all_bodies := bodies()
-	for i in range(all_bodies.size()):
-		for j in range(i + 1, all_bodies.size()):
-			all_bodies[i].add_collision_exception_with(all_bodies[j])
 	for spec in JOINTS:
 		var joint := PinJoint2D.new()
 		joint.position = spec[2] * factor
@@ -103,8 +98,60 @@ func _build() -> void:
 		add_child(joint)
 		joint.node_a = joint.get_path_to(_parts[spec[0]])
 		joint.node_b = joint.get_path_to(_parts[spec[1]])
+		joint.set_meta("anchor_a", _parts[spec[0]].to_local(joint.global_position))
+		joint.set_meta("anchor_b", _parts[spec[1]].to_local(joint.global_position))
+	_exclude_self_collisions()
 	set_world_paused(world_paused)
 	set_user_frozen(user_frozen)
+	if flipped:
+		var previous_direction := _direction
+		flipped = false
+		flip_object()
+		_direction = previous_direction
+
+func _exclude_self_collisions() -> void:
+	# Explicitly register both directions after joints finish configuring their
+	# own exceptions. These exclusions never include another object or the floor.
+	for body in bodies():
+		for other in bodies():
+			if body != other:
+				body.add_collision_exception_with(other)
+
+func flip_object() -> void:
+	if not is_instance_valid(torso):
+		return
+	var pivot := torso.global_position
+	var anchor_positions: Dictionary = {}
+	for child in get_children():
+		if child is PinJoint2D:
+			var body_a: Node2D = child.get_node(child.node_a)
+			var body_b: Node2D = child.get_node(child.node_b)
+			var anchor: Vector2 = (body_a.to_global(child.get_meta("anchor_a")) + body_b.to_global(child.get_meta("anchor_b"))) * 0.5
+			anchor_positions[child] = Vector2(pivot.x * 2.0 - anchor.x, anchor.y)
+	flipped = not flipped
+	_direction *= -1.0
+	for body in bodies():
+		body.global_position.x = pivot.x * 2.0 - body.global_position.x
+		body.rotation = -body.rotation
+		body.linear_velocity.x = -body.linear_velocity.x
+		body.angular_velocity = -body.angular_velocity
+		body.paused_velocity.x = -body.paused_velocity.x
+		body.paused_spin = -body.paused_spin
+		body.local_grab.x = -body.local_grab.x
+		body.flip_object()
+	# Rebuild anchors from the current physical pose, not spawn-time positions:
+	# the puppet may have walked or fallen far away from its Node2D origin.
+	for joint in anchor_positions:
+		var path_a: NodePath = joint.node_a
+		var path_b: NodePath = joint.node_b
+		joint.node_a = NodePath()
+		joint.node_b = NodePath()
+		joint.global_position = anchor_positions[joint]
+		joint.node_a = path_a
+		joint.node_b = path_b
+		joint.set_meta("anchor_a", joint.get_node(path_a).to_local(joint.global_position))
+		joint.set_meta("anchor_b", joint.get_node(path_b).to_local(joint.global_position))
+	_exclude_self_collisions()
 
 func _physics_process(delta: float) -> void:
 	if not ai_enabled or user_frozen or world_paused or not is_instance_valid(torso):
@@ -125,21 +172,25 @@ func _physics_process(delta: float) -> void:
 		var body: RigidBody2D = _parts[part_name]
 		var desired := 0.0
 		if "thigh" in part_name:
-			desired = sin(_phase) * 0.2 * (1 if part_name.begins_with("left") else -1)
+			desired = sin(_phase) * 0.08 * (1 if part_name.begins_with("left") else -1)
 		elif "shin" in part_name:
-			desired = sin(_phase + 0.6) * 0.13 * (1 if part_name.begins_with("left") else -1)
+			desired = sin(_phase + 0.6) * 0.06 * (1 if part_name.begins_with("left") else -1)
 		elif "arm" in part_name:
-			desired = sin(_phase) * 0.12 * (1 if part_name.begins_with("left") else -1)
+			desired = sin(_phase) * 0.08 * (1 if part_name.begins_with("left") else -1)
 		var dimensions: Vector2 = PARTS[part_name][1] * _scale_factor()
 		var inertia_estimate := body.mass * dimensions.length_squared() / 12.0
 		var angle_error := wrapf(desired - body.rotation, -PI, PI)
-		body.apply_torque(clampf((angle_error * 55.0 - body.angular_velocity * 9.0) * inertia_estimate, -120000.0, 120000.0))
+		body.apply_torque(clampf((angle_error * 80.0 - body.angular_velocity * 17.0) * inertia_estimate, -120000.0, 120000.0))
 	var total_mass := 0.0
 	for body in bodies():
 		total_mass += body.mass
-	# Partial support helps this lightweight test AI stand without making it
-	# weightless; feet and joints carry the remaining weight.
-	torso.apply_central_force(Vector2((_direction * 20.0 - torso.linear_velocity.x) * torso.mass * 1.5, -total_mass * 980.0 * 0.35))
+	# Damp vertical sag using a ground-only muscle support. Capping it below
+	# total weight prevents levitation; the feet still carry the remaining load.
+	var foot_y := maxf(_parts["left_shin"].global_position.y, _parts["right_shin"].global_position.y)
+	var desired_torso_y := foot_y - 83.0 * _scale_factor().y
+	var support := total_mass * 980.0 * 0.35 + (torso.global_position.y - desired_torso_y) * total_mass * 35.0 + torso.linear_velocity.y * total_mass * 7.0
+	support = clampf(support, 0.0, total_mass * 980.0 * 0.9)
+	torso.apply_central_force(Vector2((_direction * 8.0 - torso.linear_velocity.x) * torso.mass * 2.0, -support))
 
 func _is_grounded() -> bool:
 	var ignored: Array[RID] = []

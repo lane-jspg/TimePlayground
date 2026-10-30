@@ -21,6 +21,11 @@ func key(scene: Node, code: Key) -> void:
 	event.pressed = true
 	scene._unhandled_input(event)
 
+func connect_pair(scene: Node, kind: String, a: RigidBody2D, b: RigidBody2D) -> void:
+	scene.set_tool(kind)
+	scene.link_click(a, a.global_position)
+	scene.link_click(b, b.global_position)
+
 func all_nodes(node: Node) -> Array:
 	var result: Array = [node]
 	for child in node.get_children():
@@ -100,19 +105,30 @@ func run() -> void:
 
 	scene.open_context(prop, Vector2(1270, 710))
 	check(scene.context_menu.visible and scene.freeze_button.text == "Freeze", "context menu opens with Freeze action")
-	check(scene.context_menu.position.x <= 1110 and scene.context_menu.position.y <= 560, "context menu remains inside viewport")
+	check(scene.context_menu.position.x >= 0 and scene.context_menu.position.y >= 0 and scene.context_menu.get_global_rect().end.x <= 1281 and scene.context_menu.get_global_rect().end.y <= 721, "context menu remains inside viewport")
 	scene.context_action("freeze")
 	check(prop.user_frozen and prop.freeze, "Freeze makes body static")
+	var frozen_start: Vector2 = prop.global_position
+	var frozen_angle: float = prop.rotation
+	scene.begin_grab(prop, prop.global_position)
+	scene.move_grab(prop.global_position + Vector2(-70, -40))
+	scene.rotate_selection(0.5)
+	scene.release_grab()
+	await frames(5)
+	check(prop.global_position.distance_to(frozen_start) < 0.01 and is_equal_approx(prop.rotation, frozen_angle), "running frozen objects resist mouse and rotation edits")
+	scene.paused = true
+	scene.update_time()
 	scene.begin_grab(prop, prop.global_position)
 	var frozen_target: Vector2 = prop.global_position + Vector2(-70, -40)
 	scene.move_grab(frozen_target)
 	scene.release_grab()
-	await frames(5)
-	check(prop.global_position.distance_to(frozen_target) < 0.01, "frozen objects remain draggable")
+	scene.rotate_selection(0.25)
+	await frames(3)
+	check(prop.global_position.distance_to(frozen_target) < 0.01 and is_equal_approx(prop.rotation, frozen_angle + 0.25), "paused frozen objects remain draggable and rotatable")
 	scene.open_context(prop, Vector2(600, 300))
 	check(scene.freeze_button.text == "Unfreeze", "frozen context offers Unfreeze")
 	scene.context_action("freeze")
-	check(not prop.user_frozen and not prop.freeze, "Unfreeze re-enables physics")
+	check(not prop.user_frozen and prop.freeze, "Unfreeze while paused preserves time stop")
 	scene.paused = true
 	scene.update_time()
 	scene.open_context(prop, Vector2(600, 300))
@@ -179,7 +195,10 @@ func run() -> void:
 	scene.context_action("delete")
 	check(scene.objects.get_child_count() == 0 and scene.selected == null, "context Delete removes selected owner")
 	for kind in ["box", "wheel", "bottle"]:
+		var palette_count: int = scene.objects.get_child_count()
 		scene.spawn_from_palette(kind)
+		check(scene.objects.get_child_count() == palette_count and scene.selected_kind == kind, "palette selects %s without spawning" % kind)
+		scene.spawn_prop(Vector2(640, 360))
 		check(scene.selected.kind == kind and scene.selected.sprite.texture != null and scene.selected.world_paused, "palette spawns textured %s while paused" % kind)
 	key(scene, KEY_Q)
 	check(scene.objects.get_child_count() == 4 and scene.selected.kind == "bottle", "Q spawns selected palette object")
@@ -187,9 +206,10 @@ func run() -> void:
 	check(scene.objects.get_child_count() == 5 and is_equal_approx(scene.selected.rotation, PI / 2), "E spawns rotated selected object")
 	key(scene, KEY_R)
 	check(scene.objects.get_child_count() == 4 and scene.selected == null, "R deletes selection")
-	key(scene, KEY_C)
-	check(scene.objects.get_child_count() == 0, "C clears every object without respawning")
+	scene.clear_world()
+	check(scene.objects.get_child_count() == 0, "Clear Everything removes all objects without respawning")
 	scene.spawn_from_palette("ragdoll")
+	scene.spawn_prop(Vector2(640, 360))
 	var doll = scene.selected.object_owner
 	check(doll.bodies().size() == 11 and scene.selected.world_paused, "ragdoll palette spawns paused jointed test AI")
 	var initial_positions: Array[Vector2] = []
@@ -213,9 +233,95 @@ func run() -> void:
 	check(is_instance_valid(scene.selected) and scene.selected.object_owner == doll and doll.bodies().size() == 11, "ragdoll resize reselects rebuilt valid body")
 	key(scene, KEY_R)
 	check(scene.objects.get_child_count() == 0, "R deletes whole ragdoll rather than single limb")
+
+	# Selection, context operations and a value-only linked-group clipboard.
+	var a = scene.create_object("box", Vector2(400, 300))
+	var b = scene.create_object("wheel", Vector2(550, 300))
+	var outside = scene.create_object("bottle", Vector2(950, 300))
+	connect_pair(scene, "rope", a, b)
+	connect_pair(scene, "weld", a, b)
+	connect_pair(scene, "wire", b, outside)
+	check(scene.connection_system.connections.size() == 3 and scene.link_body == null, "rope weld and wire tools create two-click links")
+	scene.begin_marquee(Vector2(350, 250))
+	scene.finish_marquee(Vector2(600, 350))
+	check(scene.selected_owners.size() == 2 and scene.selected_owners.has(a) and scene.selected_owners.has(b) and not scene.selected_owners.has(outside), "marquee selects intersecting objects and excludes outside object")
+	scene.open_context(a, Vector2(600, 300))
+	scene.context_action("flip")
+	check(a.flipped and b.flipped and not outside.flipped, "group Flip affects selection only")
+	key(scene, KEY_C)
+	check(scene.objects.get_child_count() == 3 and scene.clipboard.snapshot.objects.size() == 2, "C copies selected group without clearing originals")
+	check(scene.clipboard.snapshot.connections.size() == 2, "clipboard includes internal rope and weld but excludes outgoing external wire")
+	var clipboard_ids: Array[int] = [a.get_instance_id(), b.get_instance_id()]
+	scene.open_context(a, Vector2(600, 300))
+	scene.context_action("delete")
+	await process_frame
+	check(scene.objects.get_child_count() == 1 and scene.connection_system.connections.is_empty(), "group Delete removes selected owners and their attached links")
+	scene.paste_selection(Vector2(800, 300))
+	var copied_owners: Array = scene.selected_owners.duplicate()
+	check(copied_owners.size() == 2 and scene.connection_system.connections.size() == 2, "clipboard pastes complete group and internal links after original deletion")
+	var independent_copies := true
+	for object in copied_owners:
+		independent_copies = independent_copies and not clipboard_ids.has(object.get_instance_id()) and object.flipped
+	check(independent_copies, "pasted objects have independent identity and preserve flip state")
+	var only_inside := true
+	for record in scene.connection_system.connections:
+		only_inside = only_inside and copied_owners.has(record.a.object_owner) and copied_owners.has(record.b.object_owner)
+	check(only_inside, "pasted links attach only to the newly pasted group")
+	scene.clear_world()
+	check(scene.objects.get_child_count() == 0 and scene.connection_system.connections.is_empty(), "Clear Everything also removes all physical and electrical links")
+	key(scene, KEY_V)
+	check(scene.selected_owners.size() == 2 and scene.objects.get_child_count() == 2 and scene.connection_system.connections.size() == 2, "V can paste value-only clipboard after Clear Everything")
+	scene.clear_world()
+
+	# Full electrical flow through actual physical objects and the CPU editor.
+	var lever = scene.create_object("lever", Vector2(350, 360))
+	var gate = scene.create_object("and_gate", Vector2(500, 360))
+	var cpu = scene.create_object("cpu", Vector2(650, 360))
+	var sink = scene.create_object("box", Vector2(800, 360))
+	connect_pair(scene, "wire", lever, gate)
+	connect_pair(scene, "wire", gate, cpu)
+	connect_pair(scene, "wire", cpu, sink)
+	scene.paused = false
+	scene.update_time()
+	scene.open_cpu_editor(cpu)
+	check(scene.cpu_panel.visible and cpu.world_paused and lever.world_paused and scene.connection_system.world_paused, "CPU editor stops physical and electrical simulation")
+	var editor_count: int = scene.objects.get_child_count()
+	key(scene, KEY_Q)
+	check(scene.objects.get_child_count() == editor_count, "CPU editor blocks gameplay hotkeys while editing")
+	var old_program: String = cpu.program_source
+	scene.code_editor.text = "extends RefCounted\nfunc wrong_entry():\n\tpass\n"
+	scene.save_cpu_program()
+	check(scene.cpu_panel.visible and not scene.code_status.text.is_empty() and cpu.program_source == old_program, "invalid CPU entry keeps editor open with error and preserves previous program")
+	var program := "extends RefCounted\nvar ticks := 0\nfunc tick(cpu, delta):\n\tticks += 1\n\tcpu.output_power = ticks >= 2\n"
+	scene.code_editor.text = program
+	scene.save_cpu_program()
+	check(not scene.cpu_panel.visible and not cpu.world_paused and cpu.program_source == program, "valid CPU instructions compile and resume simulation")
+	await frames(3)
+	check(not lever.output_power and not gate.output_power and not cpu.output_power and not sink.powered, "inactive lever leaves entire circuit unpowered")
+	scene.select_prop(lever)
+	key(scene, KEY_F)
+	await frames(8)
+	check(lever.activated and gate.output_power and cpu.powered and cpu.output_power and sink.powered, "F lever activation powers gate then executes CPU program then downstream sink")
+	scene.select_prop(gate)
+	key(scene, KEY_F)
+	await frames(6)
+	check(not gate.activated and not gate.output_power and not cpu.powered and not cpu.output_power and not sink.powered, "F deactivation on logic gate interrupts downstream CPU power")
+	scene.open_context(gate, Vector2(600, 300))
+	scene.context_action("activate")
+	await frames(6)
+	check(gate.activated and cpu.output_power and sink.powered, "context Activate restores electrical flow")
+	scene.open_context(cpu, Vector2(600, 300))
+	scene.context_action("edit instructions")
+	check(scene.cpu_panel.visible and scene.cpu_target == cpu, "CPU context Edit instructions opens bound editor")
+	scene.close_cpu_editor()
+	scene.open_context(cpu, Vector2(600, 300))
+	scene.context_action("disconnect")
+	check(scene.connection_system.connections.size() == 1, "Disconnect removes incoming and outgoing selected CPU wires")
+	scene.clear_world()
 	scene.paused = false
 	scene.update_time()
 	scene.spawn_from_palette("box")
+	scene.spawn_prop(Vector2(640, 360))
 	var previous_count: int = scene.objects.get_child_count()
 	key(scene, KEY_ESCAPE)
 	check(scene.main_menu.visible and scene.selected.world_paused, "Escape returns to main menu and stops physics")
@@ -223,5 +329,8 @@ func run() -> void:
 	check(scene.objects.get_child_count() == previous_count, "main menu blocks gameplay spawn hotkeys")
 	key(scene, KEY_ESCAPE)
 	check(not scene.main_menu.visible and not scene.selected.world_paused, "Escape resumes game from menu")
+	scene.begin_marquee(Vector2(300, 200))
+	scene.cancel_interaction()
+	check(not scene.marquee and not scene.panning, "focus loss cancels unfinished marquee and camera drag")
 	print("Smoke checks: ", checks, "; failures: ", failures)
 	quit(1 if failures else 0)

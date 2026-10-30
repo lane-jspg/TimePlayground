@@ -1,12 +1,21 @@
 class_name PlaygroundProp
 extends RigidBody2D
 
+const CpuProgram = preload("res://scripts/cpu_program.gd")
+const ELECTRONIC_KINDS := ["lever", "and_gate", "not_gate", "or_gate", "xor_gate", "cpu"]
 const TEXTURES := {
 	"box": preload("res://assets/textures/box.png"),
 	"wheel": preload("res://assets/textures/wheel.png"),
 	"bottle": preload("res://assets/textures/bottle.png"),
 }
 var kind := "box"
+var activated := true
+var powered := false
+var output_power := false
+var program_source := CpuProgram.DEFAULT_SOURCE
+var program_error := ""
+var flipped := false
+var _program = CpuProgram.new()
 var base_size := Vector2(72, 72)
 var body_size := Vector2(72, 72)
 var resize_percent := Vector2(50, 50)
@@ -26,9 +35,14 @@ var sprite: Sprite2D
 
 func configure(type: String) -> void:
 	kind = type
+	activated = kind != "lever"
+	output_power = false
 	match kind:
 		"wheel": base_size = Vector2(68, 68)
 		"bottle": base_size = Vector2(24, 72)
+		"lever": base_size = Vector2(48, 48)
+		"and_gate", "not_gate", "or_gate", "xor_gate": base_size = Vector2(60, 32)
+		"cpu": base_size = Vector2(80, 60)
 		_: base_size = Vector2(72, 72)
 	body_size = base_size
 
@@ -55,12 +69,20 @@ func _ready() -> void:
 	physics_material_override = material
 	collider = CollisionShape2D.new()
 	add_child(collider)
-	if TEXTURES.has(kind):
+	var texture: Texture2D = TEXTURES.get(kind)
+	if texture == null and ELECTRONIC_KINDS.has(kind):
+		var texture_path := "res://assets/textures/%s.png" % kind
+		if ResourceLoader.exists(texture_path):
+			texture = load(texture_path)
+	if texture:
 		sprite = Sprite2D.new()
-		sprite.texture = TEXTURES[kind]
+		sprite.texture = texture
+		sprite.flip_h = flipped
 		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		add_child(sprite)
 	update_geometry()
+	if kind == "cpu":
+		set_program(program_source)
 
 func update_geometry() -> void:
 	body_size = base_size * Vector2(maxf(0.01, resize_percent.x / 50.0), maxf(0.01, resize_percent.y / 50.0))
@@ -113,6 +135,8 @@ func set_user_frozen(value: bool) -> void:
 	sleeping = false
 
 func _integrate_forces(state: PhysicsDirectBodyState2D) -> void:
+	if user_frozen or world_paused:
+		return
 	if dragging:
 		var offset := local_grab.rotated(state.transform.get_rotation())
 		var point := state.transform.origin + offset
@@ -130,8 +154,60 @@ func _draw() -> void:
 			draw_circle(Vector2.ZERO, 1, color)
 			draw_set_transform(Vector2.ZERO)
 			# A small eye makes the AI's facing visible without extra textures.
-			draw_circle(Vector2(body_size.x * 0.2, -body_size.y * 0.1), maxf(1, body_size.x * 0.06), Color("444444"))
+			draw_circle(Vector2(body_size.x * (-0.2 if flipped else 0.2), -body_size.y * 0.1), maxf(1, body_size.x * 0.06), Color("444444"))
 		else:
 			draw_rect(Rect2(-body_size / 2.0, body_size), color)
-	if selected:
-		draw_rect(Rect2(-body_size / 2.0, body_size).grow(2), Color(1, 1, 1, 0.6), false, 1)
+	elif ELECTRONIC_KINDS.has(kind) and sprite == null:
+		# Fallback keeps a project with missing optional artwork functional.
+		draw_rect(Rect2(-body_size / 2.0, body_size), Color("555555"))
+		var text: String = {"lever": "LEVER", "and_gate": "AND", "not_gate": "NOT", "or_gate": "OR", "xor_gate": "XOR", "cpu": "CPU"}[kind]
+		draw_string(ThemeDB.fallback_font, -body_size / 2.0 + Vector2(3, body_size.y * 0.6), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
+	if ELECTRONIC_KINDS.has(kind):
+		var port_x := body_size.x * (0.5 if not flipped else -0.5)
+		draw_circle(Vector2(port_x, 0), 3.0, Color("76ee72") if output_power else Color("284029"))
+		if kind == "lever":
+			draw_line(Vector2.ZERO, Vector2(-body_size.x * 0.22 if activated else body_size.x * 0.22, -body_size.y * 0.36), Color("e4e4e4"), 3)
+
+
+func flip_object() -> void:
+	flipped = not flipped
+	if sprite:
+		sprite.flip_h = flipped
+	queue_redraw()
+
+func toggle_activation() -> void:
+	activated = not activated
+	if kind == "lever":
+		output_power = activated
+	elif not activated:
+		output_power = false
+	queue_redraw()
+
+func set_program(source: String) -> bool:
+	var valid: bool = _program.compile_program(source)
+	program_error = _program.error
+	if valid:
+		program_source = source
+	return valid
+
+func set_power_inputs(inputs: Array, delta: float) -> void:
+	if world_paused:
+		return
+	powered = false
+	var true_count := 0
+	for signal_value in inputs:
+		if bool(signal_value):
+			true_count += 1
+	powered = true_count > 0
+	match kind:
+		"lever": output_power = activated
+		"and_gate": output_power = activated and not inputs.is_empty() and true_count == inputs.size()
+		"or_gate": output_power = activated and powered
+		"xor_gate": output_power = activated and true_count % 2 == 1
+		"not_gate": output_power = activated and not inputs.is_empty() and not bool(inputs[0])
+		"cpu":
+			output_power = false
+			if activated and powered:
+				_program.run_tick(self, delta)
+		_: output_power = powered
+	queue_redraw()
